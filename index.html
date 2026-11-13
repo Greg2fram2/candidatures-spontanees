@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Candidatures spontanées</title>
+  <meta name="description" content="Importez un CSV d'entreprises, laissez Claude les rechercher sur le web et ouvrez une candidature spontanée personnalisée en brouillon Gmail.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✉️</text></svg>">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <h1>Candidatures spontanées</h1>
+      <p class="lede">CSV d'entreprises → recherche web par Claude → brouillon Gmail personnalisé à partir de votre CV.</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- 1. Réglages -->
+    <section class="card" id="settings">
+      <h2><span class="step">1</span> Réglages</h2>
+      <p class="hint">Tout reste dans votre navigateur (localStorage). Rien n'est envoyé ailleurs qu'à l'API Anthropic.</p>
+
+      <div class="grid">
+        <label class="field">
+          <span>Clé API Anthropic</span>
+          <div class="inline">
+            <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
+            <button type="button" class="ghost small" id="toggleKey">Afficher</button>
+          </div>
+        </label>
+
+        <label class="field">
+          <span>Modèle</span>
+          <select id="model">
+            <option value="claude-opus-5-5">Claude Opus 5.5 (meilleure qualité)</option>
+            <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (moins cher)</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Votre CV (PDF)</span>
+          <div class="inline">
+            <input type="file" id="cvFile" accept="application/pdf">
+          </div>
+          <small id="cvStatus" class="muted">Aucun CV chargé.</small>
+        </label>
+
+        <label class="field">
+          <span>Compte Gmail (optionnel)</span>
+          <input type="email" id="gmailAccount" placeholder="vous@gmail.com" autocomplete="off">
+          <small class="muted">Utile si vous avez plusieurs comptes Google connectés.</small>
+        </label>
+
+        <label class="field">
+          <span>Langue de la lettre</span>
+          <select id="language">
+            <option value="auto">Automatique (selon l'entreprise)</option>
+            <option value="fr">Français</option>
+            <option value="en">Anglais</option>
+          </select>
+        </label>
+
+        <label class="field wide">
+          <span>Consignes supplémentaires (optionnel)</span>
+          <textarea id="extra" rows="3" placeholder="Ex. : je cherche un poste d'AI designer ou de formateur IA, ton direct et chaleureux, 200 mots max, proposer un appel de 20 min…"></textarea>
+        </label>
+
+        <label class="field wide">
+          <span>Signature</span>
+          <textarea id="signature" rows="3" placeholder="Prénom Nom&#10;Téléphone&#10;Site web"></textarea>
+        </label>
+      </div>
+    </section>
+
+    <!-- 2. CSV -->
+    <section class="card" id="import">
+      <h2><span class="step">2</span> Importer le CSV</h2>
+      <label class="drop" id="drop">
+        <input type="file" id="csvFile" accept=".csv,text/csv">
+        <strong>Glissez un fichier .csv ici</strong> ou cliquez pour choisir
+        <small class="muted">Une ligne par entreprise. Séparateur « , » ou « ; » détecté automatiquement.</small>
+      </label>
+
+      <div id="mapping" class="grid hidden">
+        <label class="field"><span>Colonne entreprise *</span><select data-map="company"></select></label>
+        <label class="field"><span>Colonne e-mail</span><select data-map="email"></select></label>
+        <label class="field"><span>Colonne contact</span><select data-map="contact"></select></label>
+        <label class="field"><span>Colonne site web</span><select data-map="website"></select></label>
+        <label class="field"><span>Colonne notes / poste</span><select data-map="notes"></select></label>
+      </div>
+    </section>
+
+    <!-- 3. Entreprises -->
+    <section class="card hidden" id="results">
+      <div class="row-between">
+        <h2><span class="step">3</span> Entreprises <span class="count" id="count"></span></h2>
+        <div class="actions">
+          <button type="button" id="generateAll">Tout générer</button>
+          <button type="button" class="ghost" id="stopAll" disabled>Arrêter</button>
+          <button type="button" class="ghost" id="exportCsv">Exporter CSV</button>
+        </div>
+      </div>
+      <p class="hint">Gmail ne permet pas de joindre un fichier via un lien : pensez à ajouter votre CV en pièce jointe dans le brouillon. Le brouillon est enregistré automatiquement par Gmail dès l'ouverture de la fenêtre.</p>
+      <div id="list"></div>
+    </section>
+  </main>
+
+  <template id="rowTpl">
+    <article class="item">
+      <div class="item-head">
+        <div>
+          <h3 class="co"></h3>
+          <div class="meta"></div>
+        </div>
+        <div class="item-actions">
+          <span class="status"></span>
+          <button type="button" class="small gen">Générer</button>
+        </div>
+      </div>
+      <div class="item-body hidden">
+        <details class="research">
+          <summary>Ce que Claude a trouvé</summary>
+          <div class="summary"></div>
+          <ul class="sources"></ul>
+        </details>
+        <label class="field"><span>À</span><input type="email" class="to"></label>
+        <label class="field"><span>Objet</span><input type="text" class="subject"></label>
+        <label class="field"><span>Message</span><textarea class="body" rows="12"></textarea></label>
+        <div class="item-foot">
+          <a class="button gmail" target="_blank" rel="noopener">Ouvrir le brouillon dans Gmail</a>
+          <button type="button" class="ghost small copy">Copier le texte</button>
+          <small class="muted len"></small>
+        </div>
+      </div>
+    </article>
+  </template>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
