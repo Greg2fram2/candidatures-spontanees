@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Candidatures spontanées</title>
-  <meta name="description" content="Importez un CSV d'entreprises, laissez Claude les rechercher sur le web et ouvrez une candidature spontanée personnalisée en brouillon Gmail.">
+  <meta name="description" content="Importez un CSV d'entreprises, laissez l'IA les rechercher sur le web et ouvrez une candidature spontanée personnalisée en brouillon Gmail.">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✉️</text></svg>">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
@@ -13,7 +13,7 @@
   <header class="top">
     <div class="wrap">
       <h1>Candidatures spontanées</h1>
-      <p class="lede">CSV d'entreprises → recherche web par Claude → brouillon Gmail personnalisé à partir de votre CV.</p>
+      <p class="lede">CSV d'entreprises → recherche web par l'IA → brouillon Gmail personnalisé à partir de votre CV.</p>
     </div>
   </header>
 
@@ -21,22 +21,23 @@
     <!-- 1. Réglages -->
     <section class="card" id="settings">
       <h2><span class="step">1</span> Réglages</h2>
-      <p class="hint">Tout reste dans votre navigateur (localStorage). Rien n'est envoyé ailleurs qu'à l'API Anthropic.</p>
+      <p class="hint">Tout reste dans votre navigateur (localStorage). Rien n'est envoyé ailleurs qu'à l'API OpenAI.</p>
 
       <div class="grid">
         <label class="field">
-          <span>Clé API Anthropic</span>
+          <span>Clé API OpenAI</span>
           <div class="inline">
-            <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
-            <button type="button" class="ghost small" id="toggleKey">Afficher</button>
+            <input type="password" id="apiKey" placeholder="Collez votre clé ici" autocomplete="off" spellcheck="false" autocapitalize="off" data-lpignore="true" data-1p-ignore data-bwignore>
+            <button type="button" class="ghost small hidden" id="clearKey">Effacer</button>
           </div>
+          <small id="keyStatus" class="muted">Aucune clé enregistrée.</small>
         </label>
 
         <label class="field">
           <span>Modèle</span>
           <select id="model">
-            <option value="claude-opus-5-5">Claude Opus 5.5 (meilleure qualité)</option>
-            <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (moins cher)</option>
+            <option value="gpt-6-astra">GPT-6 Astra (meilleure qualité)</option>
+            <option value="gpt-6.1-sol">GPT-6.1 Sol (moins cher)</option>
           </select>
         </label>
 
@@ -122,7 +123,7 @@
       </div>
       <div class="item-body hidden">
         <details class="research">
-          <summary>Ce que Claude a trouvé</summary>
+          <summary>Ce que l'IA a trouvé</summary>
           <div class="summary"></div>
           <ul class="sources"></ul>
         </details>

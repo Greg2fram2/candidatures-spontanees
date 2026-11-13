@@ -1,4 +1,4 @@
-import Anthropic from "https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@1.8.0/+esm";
+import OpenAI from "https://cdn.jsdelivr.net/npm/openai@7.56.0/+esm";
 
 // ---------- Stockage local (navigateur uniquement) ----------
 const store = {
@@ -27,12 +27,21 @@ for (const id of settingIds) {
   el.addEventListener("change", () => { store.set(id, el.value); refreshAllLinks(); });
 }
 
-$("#toggleKey").addEventListener("click", () => {
-  const input = $("#apiKey");
-  const show = input.type === "password";
-  input.type = show ? "text" : "password";
-  $("#toggleKey").textContent = show ? "Masquer" : "Afficher";
+// La clé n'est jamais affichée en clair : champ masqué, pas de bouton « afficher ».
+const keyInput = $("#apiKey");
+function renderKeyStatus() {
+  const has = keyInput.value.trim().length > 0;
+  $("#keyStatus").textContent = has ? "Clé enregistrée dans ce navigateur ✓" : "Aucune clé enregistrée.";
+  $("#clearKey").classList.toggle("hidden", !has);
+}
+keyInput.addEventListener("input", renderKeyStatus);
+for (const t of ["copy", "cut", "dragstart"]) keyInput.addEventListener(t, (e) => e.preventDefault());
+$("#clearKey").addEventListener("click", () => {
+  keyInput.value = "";
+  store.set("apiKey", "");
+  renderKeyStatus();
 });
+renderKeyStatus();
 
 let cv = store.get("cv"); // { name, data (base64) }
 function renderCvStatus() {
@@ -207,7 +216,7 @@ function refreshLink(item) {
 }
 function refreshAllLinks() { items.forEach((i) => results[keyOf(i.row)] && refreshLink(i)); }
 
-// ---------- Génération avec Claude ----------
+// ---------- Génération (API OpenAI + recherche web) ----------
 function buildSystem() {
   const lang = $("#language").value;
   const langRule = {
@@ -257,101 +266,104 @@ function companyBrief(row) {
   return lines.join("\n");
 }
 
-let useFallbacks = true;
-
-async function callClaude(item, onProgress) {
-  const client = new Anthropic({ apiKey: $("#apiKey").value.trim(), dangerouslyAllowBrowser: true });
-  const userContent = [
+async function callOpenAI(item, onProgress) {
+  const client = new OpenAI({ apiKey: $("#apiKey").value.trim(), dangerouslyAllowBrowser: true, maxRetries: 1 });
+  const stream = await client.responses.create(
     {
-      type: "document",
-      source: { type: "base64", media_type: "application/pdf", data: cv.data },
-      title: "CV du candidat",
-      cache_control: { type: "ephemeral" }, // le CV est réutilisé pour chaque entreprise
+      model: $("#model").value,
+      instructions: buildSystem(),
+      // Consignes et CV en premier (identiques d'une entreprise à l'autre) : le cache d'OpenAI les réutilise.
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "input_file", filename: cv.name || "cv.pdf", file_data: `data:application/pdf;base64,${cv.data}` },
+            { type: "input_text", text: companyBrief(item.row) },
+          ],
+        },
+      ],
+      tools: [{ type: "web_search" }],
+      include: ["web_search_call.action.sources"],
+      reasoning: { effort: "medium" },
+      max_output_tokens: 16000,
+      store: false,
+      stream: true,
     },
-    { type: "text", text: companyBrief(item.row) },
-  ];
-  const model = $("#model").value;
-  const base = {
-    model,
-    max_tokens: 16000,
-    system: buildSystem(),
-    tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 6 }],
-    output_config: { effort: "medium" },
-  };
+    { signal: item.controller.signal },
+  );
 
-  let assistant = [];
-  for (let turn = 0; turn < 5; turn++) {
-    const messages = [{ role: "user", content: userContent }];
-    if (assistant.length) messages.push({ role: "assistant", content: assistant });
-    const params = useFallbacks
-      ? { ...base, messages, betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" }
-      : { ...base, messages };
-
-    let msg;
-    try {
-      const stream = client.beta.messages.stream(params, { signal: item.controller.signal });
-      stream.on("streamEvent", (ev) => {
-        if (ev.type === "content_block_start") onProgress(ev.content_block.type);
-      });
-      msg = await stream.finalMessage();
-    } catch (err) {
-      // Si le compte n'a pas accès au fallback serveur, on réessaie sans.
-      if (useFallbacks && err instanceof Anthropic.BadRequestError && /fallback|beta/i.test(err.message)) {
-        useFallbacks = false;
-        turn--;
-        continue;
-      }
-      throw err;
-    }
-
-    assistant = [...assistant, ...msg.content];
-    if (msg.stop_reason === "pause_turn") continue; // le serveur reprend la recherche
-    if (msg.stop_reason === "refusal") throw new Error("Claude a refusé cette demande.");
-    if (msg.stop_reason === "max_tokens") throw new Error("Réponse tronquée (max_tokens).");
-    return assistant;
+  let final = null;
+  for await (const ev of stream) {
+    if (ev.type === "response.web_search_call.in_progress") onProgress("search");
+    else if (ev.type === "response.output_text.delta") onProgress("text");
+    else if (ev.type === "response.reasoning_summary_part.added" || ev.type === "response.reasoning_text.delta") onProgress("thinking");
+    else if (ev.type === "response.completed" || ev.type === "response.incomplete") final = ev.response;
+    else if (ev.type === "response.failed") throw new Error(ev.response?.error?.message || "La génération a échoué.");
+    else if (ev.type === "error") throw new Error(ev.message || "Erreur pendant la génération.");
   }
-  throw new Error("La recherche n'a pas abouti (trop d'étapes).");
+  if (!final) throw new Error("Réponse interrompue, réessayez.");
+  if (final.status === "incomplete") {
+    const why = final.incomplete_details?.reason;
+    throw new Error(why === "max_output_tokens" ? "Réponse tronquée (limite de longueur)." : why === "content_filter" ? "Réponse bloquée par le filtre de contenu." : "Réponse incomplète, réessayez.");
+  }
+  return final.output || [];
 }
 
-function parseOutput(content) {
-  const text = content.filter((b) => b.type === "text").map((b) => b.text).join("");
+function parseOutput(output) {
+  const parts = output.filter((o) => o.type === "message").flatMap((o) => o.content || []);
+  const refusal = parts.find((c) => c.type === "refusal");
+  const text = parts.filter((c) => c.type === "output_text").map((c) => c.text).join("");
+  if (!text && refusal) throw new Error("Le modèle a refusé cette demande.");
   const grab = (tag) => {
     const all = [...text.matchAll(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "g"))];
     return all.length ? all[all.length - 1][1].trim() : "";
   };
   const subject = grab("objet");
   const body = grab("message");
-  if (!subject || !body) throw new Error("Réponse inattendue de Claude, réessayez.");
+  if (!subject || !body) throw new Error("Réponse inattendue du modèle, réessayez.");
 
-  // Sources : d'abord celles citées, sinon les premiers résultats de recherche
+  // Sources : d'abord celles citées, sinon celles consultées par la recherche web
   const seen = new Map();
-  for (const b of content) {
-    for (const c of (b.type === "text" && b.citations) || []) {
-      if (c.url && !seen.has(c.url)) seen.set(c.url, { url: c.url, title: c.title });
+  for (const c of parts) {
+    for (const a of c.annotations || []) {
+      if (a.type === "url_citation" && a.url && !seen.has(a.url)) seen.set(a.url, { url: a.url, title: a.title });
     }
   }
   if (!seen.size) {
-    for (const b of content) {
-      if (b.type === "web_search_tool_result" && Array.isArray(b.content)) {
-        for (const r of b.content) if (r.url && !seen.has(r.url)) seen.set(r.url, { url: r.url, title: r.title });
-      }
+    for (const o of output) {
+      if (o.type !== "web_search_call") continue;
+      for (const src of o.action?.sources || []) if (src.url && !seen.has(src.url)) seen.set(src.url, { url: src.url, title: src.title });
     }
   }
   return { subject, body, summary: grab("recherche"), sources: [...seen.values()].slice(0, 8) };
 }
 
+// Les erreurs de /v1/responses (ex. 401) n'ont pas d'en-tête CORS : le navigateur ne voit
+// qu'une « erreur de connexion ». /v1/models, lui, en a un : on s'en sert pour diagnostiquer.
+async function diagnose(err) {
+  if (!(err instanceof OpenAI.APIConnectionError) || err instanceof OpenAI.APIUserAbortError) return err;
+  try {
+    const client = new OpenAI({ apiKey: $("#apiKey").value.trim(), dangerouslyAllowBrowser: true, maxRetries: 0 });
+    await client.models.retrieve($("#model").value);
+    return err;
+  } catch (e) {
+    return e instanceof OpenAI.APIConnectionError ? err : e;
+  }
+}
+
 function errorMessage(err) {
-  if (err instanceof Anthropic.AuthenticationError) return "Clé API invalide.";
-  if (err instanceof Anthropic.PermissionDeniedError) return "Accès refusé (vérifiez la recherche web dans la console Anthropic).";
-  if (err instanceof Anthropic.RateLimitError) return "Limite de débit atteinte, réessayez dans un instant.";
-  if (err instanceof Anthropic.APIUserAbortError || err?.name === "AbortError") return "Arrêté.";
-  if (err instanceof Anthropic.APIConnectionError) return "Connexion impossible à l'API.";
-  if (err instanceof Anthropic.APIError) return `Erreur API ${err.status ?? ""} : ${err.error?.error?.message || err.message}`;
+  if (err instanceof OpenAI.NotFoundError) return "Modèle indisponible pour cette clé : essayez l'autre modèle.";
+  if (err instanceof OpenAI.APIUserAbortError || err?.name === "AbortError") return "Arrêté.";
+  if (err instanceof OpenAI.AuthenticationError) return "Clé API invalide.";
+  if (err instanceof OpenAI.PermissionDeniedError) return "Accès refusé (vérifiez les droits de la clé sur platform.openai.com).";
+  if (err instanceof OpenAI.RateLimitError) return /quota/i.test(err.message) ? "Crédit OpenAI épuisé : vérifiez la facturation." : "Limite de débit atteinte, réessayez dans un instant.";
+  if (err instanceof OpenAI.APIConnectionError) return "Connexion impossible à l'API.";
+  if (err instanceof OpenAI.APIError) return `Erreur API ${err.status ?? ""} : ${err.error?.message || err.message}`;
   return err?.message || String(err);
 }
 
 function ready() {
-  if (!$("#apiKey").value.trim()) { alert("Ajoutez votre clé API Anthropic dans les réglages."); return false; }
+  if (!$("#apiKey").value.trim()) { alert("Ajoutez votre clé API OpenAI dans les réglages."); return false; }
   if (!cv) { alert("Chargez votre CV (PDF) dans les réglages."); return false; }
   return true;
 }
@@ -363,10 +375,11 @@ async function generate(item) {
   btn.disabled = true;
   setStatus(item, "Démarrage…", "busy");
   let searches = 0;
+  let writing = false;
   try {
-    const content = await callClaude(item, (type) => {
-      if (type === "server_tool_use") setStatus(item, `Recherche web (${++searches})…`, "busy");
-      else if (type === "text") setStatus(item, "Rédaction…", "busy");
+    const content = await callOpenAI(item, (type) => {
+      if (type === "search") setStatus(item, `Recherche web (${++searches})…`, "busy");
+      else if (type === "text") { if (!writing) { writing = true; setStatus(item, "Rédaction…", "busy"); } }
       else if (type === "thinking") setStatus(item, "Réflexion…", "busy");
     });
     const parsed = parseOutput(content);
@@ -381,7 +394,7 @@ async function generate(item) {
     showResult(item, r);
   } catch (err) {
     console.error(err);
-    setStatus(item, errorMessage(err), "err");
+    setStatus(item, errorMessage(await diagnose(err)), "err");
   } finally {
     item.controller = null;
     btn.disabled = false;
